@@ -1,0 +1,89 @@
+rules_version = '2';
+
+// Reglas de seguridad de Firestore para "Técnico en Veterinaria".
+// PRINCIPIO: nadie puede borrar datos (ni usuarios, ni administradores) y los
+// resultados de evaluaciones solo se pueden CREAR, nunca modificar.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function iniciada() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+    function correo() {
+      return request.auth.token.email.lower();
+    }
+    function esAdmin() {
+      return iniciada() && correo() in ['aspechg@gmail.com', 'jpechsulub@gmail.com'];
+    }
+    function aprobado() {
+      return iniciada() &&
+        get(/databases/$(database)/documents/usuarios/$(request.auth.uid)).data.estado == 'aprobado';
+    }
+
+    // ---- Usuarios: se registran solos (en estado pendiente); solo admins cambian el estado
+    match /usuarios/{uid} {
+      allow read: if iniciada() && (request.auth.uid == uid || esAdmin());
+
+      allow create: if iniciada()
+        && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['email', 'nombre', 'estado', 'rol', 'creadoEn'])
+        && request.resource.data.email == correo()
+        && request.resource.data.nombre is string
+        && request.resource.data.nombre.size() >= 3
+        && request.resource.data.nombre.size() <= 80
+        && request.resource.data.creadoEn == request.time
+        && (esAdmin()
+            || (request.resource.data.estado == 'pendiente' && request.resource.data.rol == 'usuario'));
+
+      allow update: if esAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['estado', 'actualizadoPor', 'actualizadoEn'])
+        && request.resource.data.estado in ['pendiente', 'aprobado', 'rechazado', 'suspendido'];
+
+      allow delete: if false;
+    }
+
+    // ---- Evaluaciones: solo usuarios aprobados, solo creación
+    match /intentos/{id} {
+      allow read: if iniciada() && (resource.data.uid == request.auth.uid || esAdmin());
+
+      allow create: if aprobado()
+        && request.resource.data.keys().hasOnly(
+             ['uid', 'email', 'nombre', 'moduloId', 'moduloTitulo', 'puntaje', 'total', 'porSeccion', 'respuestas', 'fecha'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.email == correo()
+        && request.resource.data.puntaje is int
+        && request.resource.data.total is int
+        && request.resource.data.puntaje >= 0
+        && request.resource.data.puntaje <= request.resource.data.total
+        && request.resource.data.fecha == request.time;
+
+      allow update, delete: if false;
+    }
+
+    // ---- Registro de envíos de correo: solo creación
+    match /envios/{id} {
+      allow read: if iniciada() && (resource.data.uid == request.auth.uid || esAdmin());
+      allow create: if aprobado()
+        && request.resource.data.keys().hasOnly(['intentoId', 'uid', 'para', 'ok', 'detalle', 'fecha'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.para == correo()
+        && request.resource.data.fecha == request.time;
+      allow update, delete: if false;
+    }
+
+    // ---- Bitácora de decisiones de los administradores: solo creación
+    match /bitacora/{id} {
+      allow read: if esAdmin();
+      allow create: if esAdmin()
+        && request.resource.data.keys().hasOnly(['uid', 'estadoNuevo', 'por', 'motivo', 'fecha'])
+        && request.resource.data.por == correo()
+        && request.resource.data.fecha == request.time;
+      allow update, delete: if false;
+    }
+
+    // Todo lo demás, denegado
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
